@@ -63,21 +63,26 @@ export default function Home() {
     setHasSearched(true)
     setResults([])
     setActiveTab('all')
-    try {
-      const res = await fetch(
-        `/api/clearance?postal=${clean}&stores=${selectedStores.join(',')}&minDiscount=${minDiscount}`
-      )
-      if (!res.ok) throw new Error(`Server error: ${res.status}`)
-      const data = await res.json() as { results: StoreResult[] }
-      // Record all returned item IDs so we can track freshness over time
-      const allIds = data.results.flatMap(r => r.items.map(i => i.id))
-      recordSeen(allIds)
-      setResults(data.results)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed')
-    } finally {
-      setLoading(false)
+
+    // Fetch one store at a time — keeps each request under Vercel's 25s timeout
+    // and respects ScraperAPI's 1 concurrent request limit on free plan
+    for (const storeId of selectedStores) {
+      // Add a loading placeholder so the UI shows the store is in progress
+      setResults(prev => [...prev, { storeId, storeName: STORE_META[storeId].label, items: [], loading: true }])
+      try {
+        const res = await fetch(`/api/clearance?postal=${clean}&store=${storeId}&minDiscount=${minDiscount}`)
+        const data = await res.json() as { storeId: StoreId; items: import('@/lib/types').ClearanceItem[]; error?: string }
+        recordSeen(data.items.map(i => i.id))
+        setResults(prev => prev.map(r =>
+          r.storeId === storeId ? { ...r, items: data.items, error: data.error, loading: false } : r
+        ))
+      } catch (err) {
+        setResults(prev => prev.map(r =>
+          r.storeId === storeId ? { ...r, error: err instanceof Error ? err.message : 'Failed', loading: false } : r
+        ))
+      }
     }
+    setLoading(false)
   }
 
   function saveItem(item: ClearanceItem) {
@@ -174,10 +179,10 @@ export default function Home() {
 
       {/* Results */}
       <main className="max-w-2xl mx-auto px-4 py-4">
-        {loading && (
+        {loading && results.length === 0 && (
           <div className="flex flex-col items-center justify-center py-20 gap-3">
             <div className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
-            <p className="text-zinc-400 text-sm">Scanning stores near {postalCode}…</p>
+            <p className="text-zinc-400 text-sm">Starting scan…</p>
           </div>
         )}
 
@@ -206,8 +211,7 @@ export default function Home() {
                         : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
                     }`}
                   >
-                    {r.storeName} ({r.items.length})
-                    {r.error && ' ⚠'}
+                    {r.loading ? `${r.storeName} ⏳` : `${r.storeName} (${r.items.length})${r.error ? ' ⚠' : ''}`}
                   </button>
                 ))}
               </div>
