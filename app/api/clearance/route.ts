@@ -145,8 +145,9 @@ async function hdClearance(province: string): Promise<ClearanceItem[]> {
 // __NEXT_DATA__.props.pageProps.initialData.searchResult.itemStacks[n].items
 async function wmClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('walmart', 'Walmart', province)
-  // The search?q=clearance URL redirects to this canonical clearance category page
-  const html = await getHtml('https://www.walmart.ca/en/shop/clearance/6000204800999')
+  // search?q=clearance redirects to the clearance category page and that final URL has __NEXT_DATA__
+  // Using the canonical URL directly skips that redirect and returns a static page without SSR data
+  const html = await getHtml('https://www.walmart.ca/search?q=clearance')
   const nd = extractNextData(html)
   if (!nd) throw new Error('No __NEXT_DATA__ found — Walmart page structure may have changed')
 

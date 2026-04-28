@@ -4,6 +4,7 @@ export const maxDuration = 30
 
 export async function GET(req: NextRequest) {
   const url = req.nextUrl.searchParams.get('url') ?? ''
+  const snip = req.nextUrl.searchParams.get('snip') ?? '' // find this string and return surrounding context
   if (!url) return NextResponse.json({ error: 'url param required' }, { status: 400 })
 
   const key = process.env.SCRAPER_API_KEY
@@ -61,6 +62,14 @@ export async function GET(req: NextRequest) {
       dataPatterns,
       ngState,
       bodyPreview: text.slice(0, 3000),
+      // If snip= param given, find first occurrence and show surrounding 800 chars
+      snipContext: snip ? (() => {
+        const idx = text.indexOf(snip)
+        if (idx === -1) return `"${snip}" not found in response`
+        const start = Math.max(0, idx - 200)
+        const end = Math.min(text.length, idx + 600)
+        return text.slice(start, end)
+      })() : undefined,
     })
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err), targetUrl: url })
