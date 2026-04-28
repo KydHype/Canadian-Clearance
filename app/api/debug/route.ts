@@ -8,30 +8,31 @@ function proxied(url: string) {
   return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&render=false`
 }
 
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms))
+
 const TESTS = [
-  // Home Depot store locator variations
-  { n: 'HD-1', url: 'https://www.homedepot.ca/api/2.0/storelocator/store?postalCode=V1T3A5&maxResults=3' },
-  { n: 'HD-2', url: 'https://www.homedepot.ca/api/2.0/storelocator/stores?postalCode=V1T3A5&maxResults=3' },
-  { n: 'HD-3', url: 'https://www.homedepot.ca/api/v1/storelocator?postalCode=V1T3A5&maxResults=3' },
-  { n: 'HD-4', url: 'https://www.homedepot.ca/api/2.0/store/search?postalCode=V1T3A5' },
-  // Walmart store locator variations
-  { n: 'WM-1', url: 'https://www.walmart.ca/api/restfulservices/v2/stores?postal=V1T3A5&count=3' },
-  { n: 'WM-2', url: 'https://www.walmart.ca/api/2.0/stores/nearBySearch?postalCode=V1T3A5&seeAllStores=true' },
-  { n: 'WM-3', url: 'https://www.walmart.ca/api/2.0/stores?postalCode=V1T3A5' },
-  { n: 'WM-4', url: 'https://www.walmart.ca/api/graphql' },
-  // Canadian Tire
-  { n: 'CT-1', url: 'https://api.canadiantire.ca/store/api/v1/stores/?postalCode=V1T3A5&radius=100&maxCount=3&lang=en' },
-  { n: 'CT-2', url: 'https://api.canadiantire.ca/store/api/v2/stores?postalCode=V1T3A5&radius=100&maxCount=3' },
-  { n: 'CT-3', url: 'https://www.canadiantire.ca/api/store/v1/stores?postalCode=V1T3A5&radius=100' },
-  { n: 'CT-4', url: 'https://api.canadiantire.ca/v1/stores?postalCode=V1T3A5&radius=100' },
-  // Best Buy store locator - increase radius, try more patterns
-  { n: 'BB-1', url: 'https://www.bestbuy.ca/api/2.0/stores/bypostalcode?postalCode=V1T3A5&radius=300&lang=en&currentRegion=CA' },
-  { n: 'BB-2', url: 'https://www.bestbuy.ca/api/2.0/stores?postalCode=V1T3A5&maxResults=5&radius=300&currentRegion=CA' },
-  { n: 'BB-3', url: 'https://www.bestbuy.ca/api/2.0/page/search?currentRegion=CA&query=clearance&pageSize=10&lang=en-CA' },
+  // Home Depot - try search directly (skip store locator)
+  { n: 'HD-search', url: 'https://www.homedepot.ca/api/2.0/page/search?pageType=search&q=clearance&pageSize=5' },
+  { n: 'HD-storelocator-v2', url: 'https://www.homedepot.ca/api/2.0/storelocator?postalCode=V1T3A5&maxResults=3' },
+  { n: 'HD-stores-nearby', url: 'https://www.homedepot.ca/api/2.0/store/nearby?postalCode=V1T3A5' },
+  // Walmart - try search directly + different store locators
+  { n: 'WM-search', url: 'https://www.walmart.ca/api/2.0/page/search?q=clearance&facet=deal_type%3ANA%3ANA%3AClearance%3ANA%3ANA&pageSize=5' },
+  { n: 'WM-stores-v2', url: 'https://www.walmart.ca/api/2.0/store/nearby?postalCode=V1T3A5' },
+  { n: 'WM-stores-v3', url: 'https://www.walmart.ca/api/2.0/stores/location?postalCode=V1T3A5&count=3' },
+  // Canadian Tire - www domain (CT-3 returned their own JSON 404, so www.canadiantire.ca/api/ is real)
+  { n: 'CT-www-v1', url: 'https://www.canadiantire.ca/api/store/v1/stores/search?postalCode=V1T3A5&radius=100' },
+  { n: 'CT-www-v2', url: 'https://www.canadiantire.ca/api/store/v1/stores/byPostalCode?postalCode=V1T3A5&radius=100' },
+  { n: 'CT-search', url: 'https://api.canadiantire.ca/search/api/v0/product/search/?q=clearance&pageSize=5&lang=en_CA&fields=FULL' },
+  // Best Buy - search directly + wider radius store locator
+  { n: 'BB-search', url: 'https://www.bestbuy.ca/api/2.0/page/search?currentRegion=CA&query=clearance&pageSize=5&lang=en-CA' },
+  { n: 'BB-stores-wide', url: 'https://www.bestbuy.ca/api/2.0/stores/bypostalcode?postalCode=V1T3A5&radius=500&lang=en&currentRegion=CA' },
 ]
 
 export async function GET() {
-  const results = await Promise.all(TESTS.map(async t => {
+  const results = []
+
+  // Run sequentially to stay within ScraperAPI free plan (1 concurrent request)
+  for (const t of TESTS) {
     try {
       const res = await fetch(proxied(t.url), {
         headers: {
@@ -42,12 +43,13 @@ export async function GET() {
         signal: AbortSignal.timeout(12000),
       })
       let preview = ''
-      try { preview = (await res.text()).slice(0, 200) } catch {}
-      return { n: t.n, status: res.status, ok: res.ok, preview }
+      try { preview = (await res.text()).slice(0, 250) } catch {}
+      results.push({ n: t.n, status: res.status, ok: res.ok, preview })
     } catch (e) {
-      return { n: t.n, status: 0, error: String(e).slice(0, 100) }
+      results.push({ n: t.n, status: 0, error: String(e).slice(0, 80) })
     }
-  }))
+    await delay(600) // stay under concurrency limit
+  }
 
   return NextResponse.json(results, { headers: { 'Cache-Control': 'no-store' } })
 }
