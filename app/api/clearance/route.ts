@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { StoreId, StoreLocation, ClearanceItem } from '@/lib/types'
 
-export const runtime = 'edge'
+// Node.js serverless runtime — 60s max, needed for render=true (JS execution via ScraperAPI)
+export const maxDuration = 60
 
 const PROVINCE_MAP: Record<string, string> = {
   A: 'NL', B: 'NS', C: 'PE', E: 'NB', G: 'QC', H: 'QC', J: 'QC',
@@ -9,22 +10,30 @@ const PROVINCE_MAP: Record<string, string> = {
   R: 'MB', S: 'SK', T: 'AB', V: 'BC', X: 'NT', Y: 'YT',
 }
 
-function proxied(url: string, render = false) {
+function proxied(url: string) {
   const key = process.env.SCRAPER_API_KEY
   if (!key) return url
-  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&render=${render}&country_code=ca`
+  // render=true executes JavaScript so we get the fully-rendered DOM, not just initial HTML
+  // wait=5000 gives React/Next.js 5 extra seconds to mount product lists
+  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&render=true&wait=5000&country_code=ca&device_type=desktop`
 }
 
 async function fetchHtml(url: string): Promise<string> {
-  const res = await fetch(proxied(url, false), {
+  const res = await fetch(proxied(url), {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
-      'Accept': 'text/html,application/xhtml+xml,*/*',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
       'Accept-Language': 'en-CA,en;q=0.9',
     },
-    signal: AbortSignal.timeout(18000),
+    signal: AbortSignal.timeout(55000),
   })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) {
+    // Include preview of the response so error messages are more helpful
+    const preview = await res.text().then(t =>
+      t.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 250)
+    ).catch(() => '')
+    throw new Error(`HTTP ${res.status}${preview ? ` — ${preview}` : ''}`)
+  }
   return res.text()
 }
 
@@ -39,9 +48,20 @@ function extractNextData(html: string): Record<string, unknown> | null {
   try { return JSON.parse(html.slice(jsonStart, jsonEnd)) as Record<string, unknown> } catch { return null }
 }
 
+// Extract all inline JSON blobs from <script> tags (catches window.__STATE__ etc.)
+function extractInlineJsonBlobs(html: string): unknown[] {
+  const blobs: unknown[] = []
+  const re = /<script[^>]*>\s*([\[{][\s\S]*?)\s*<\/script>/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html)) !== null) {
+    try { blobs.push(JSON.parse(m[1])) } catch { /* ignore */ }
+  }
+  return blobs
+}
+
 // Recursively search nested objects for an array matching given key names
 function findByKeys(obj: unknown, keys: string[], depth = 0): unknown[] | null {
-  if (depth > 8 || obj == null || typeof obj !== 'object') return null
+  if (depth > 10 || obj == null || typeof obj !== 'object') return null
   if (Array.isArray(obj)) {
     for (const item of obj) {
       const r = findByKeys(item, keys, depth + 1)
@@ -60,6 +80,22 @@ function findByKeys(obj: unknown, keys: string[], depth = 0): unknown[] | null {
   return null
 }
 
+// Try all data sources in the HTML to find a product array
+function extractProducts(html: string, keys: string[]): Record<string, unknown>[] {
+  // 1. __NEXT_DATA__ (Next.js SSR)
+  const nd = extractNextData(html)
+  if (nd) {
+    const found = findByKeys(nd, keys)
+    if (found?.length) return found as Record<string, unknown>[]
+  }
+  // 2. Any other inline JSON blobs (window.__STATE__, apollo cache, etc.)
+  for (const blob of extractInlineJsonBlobs(html)) {
+    const found = findByKeys(blob, keys)
+    if (found?.length) return found as Record<string, unknown>[]
+  }
+  return []
+}
+
 function fakeStore(storeId: StoreId, label: string, province: string): StoreLocation {
   return { storeNo: '0', name: `${label} (${province})`, address: '', city: '', province, postalCode: '' }
 }
@@ -68,9 +104,8 @@ function fakeStore(storeId: StoreId, label: string, province: string): StoreLoca
 async function hdClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('homedepot', 'Home Depot', province)
   const html = await fetchHtml('https://www.homedepot.ca/en/home/special-buys/clearance.html')
-  const nd = extractNextData(html)
-  const products = (findByKeys(nd, ['products', 'items', 'results', 'skus']) ?? []) as Record<string, unknown>[]
-  if (!products.length) throw new Error('No product data in page')
+  const products = extractProducts(html, ['products', 'items', 'results', 'skus', 'productList', 'catalogItems', 'data'])
+  if (!products.length) throw new Error('No product data in page — store may have changed its structure')
   return products.flatMap(p => {
     const pr = (p.pricing as Record<string, unknown>) ?? (p.price as Record<string, unknown>) ?? {}
     const orig = Number(pr.wasPrice ?? pr.originalPrice ?? pr.regularPrice ?? p.wasPrice ?? 0)
@@ -91,24 +126,24 @@ async function hdClearance(province: string): Promise<ClearanceItem[]> {
 async function wmClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('walmart', 'Walmart', province)
   const html = await fetchHtml('https://www.walmart.ca/en/clearance')
-  const nd = extractNextData(html)
-  const products = (findByKeys(nd, ['items', 'products', 'itemStacks', 'results', 'skus']) ?? []) as Record<string, unknown>[]
-  if (!products.length) throw new Error('No product data in page')
+  const products = extractProducts(html, ['items', 'products', 'itemStacks', 'results', 'skus', 'nodes', 'edges', 'searchResult'])
+  if (!products.length) throw new Error('No product data in page — store may have changed its structure')
   return products.flatMap(p => {
-    const pi = (p.priceInfo as Record<string, unknown>) ?? (p.price as Record<string, unknown>) ?? {}
-    const orig = Number(pi.wasPrice ?? pi.listPrice ?? pi.regularPrice ?? p.wasPrice ?? 0)
-    const curr = Number(pi.currentPrice ?? pi.salePrice ?? p.currentPrice ?? p.salePrice ?? p.price ?? 0)
+    const node = (p.node as Record<string, unknown>) ?? p
+    const pi = (node.priceInfo as Record<string, unknown>) ?? (node.price as Record<string, unknown>) ?? {}
+    const orig = Number(pi.wasPrice ?? pi.listPrice ?? pi.regularPrice ?? node.wasPrice ?? 0)
+    const curr = Number(pi.currentPrice ?? pi.salePrice ?? node.currentPrice ?? node.salePrice ?? node.price ?? 0)
     if (!curr) return []
-    const imgs = Array.isArray(p.imageInfo) ? p.imageInfo as Record<string, unknown>[] : []
-    const imgUrl = (p.imageInfo as Record<string, unknown>)?.thumbnailUrl ?? imgs[0]?.url ?? p.image ?? p.imageUrl
-    return [{ id: `wm-${p.itemId ?? p.id ?? p.sku}`, storeId: 'walmart' as const, storeLocation: store,
-      name: String(p.name ?? p.description ?? ''), brand: String(p.brand ?? p.brandName ?? ''),
-      sku: String(p.itemId ?? p.id ?? p.sku ?? ''),
+    const imgs = Array.isArray(node.imageInfo) ? node.imageInfo as Record<string, unknown>[] : []
+    const imgUrl = (node.imageInfo as Record<string, unknown>)?.thumbnailUrl ?? imgs[0]?.url ?? node.image ?? node.imageUrl
+    return [{ id: `wm-${node.itemId ?? node.id ?? node.sku}`, storeId: 'walmart' as const, storeLocation: store,
+      name: String(node.name ?? node.description ?? ''), brand: String(node.brand ?? node.brandName ?? ''),
+      sku: String(node.itemId ?? node.id ?? node.sku ?? ''),
       originalPrice: orig || curr, clearancePrice: curr,
       discountPercent: orig > curr ? Math.round((1 - curr / orig) * 100) : 0,
       imageUrl: imgUrl ? String(imgUrl) : undefined,
-      productUrl: p.canonicalUrl ? `https://www.walmart.ca${p.canonicalUrl}` : undefined,
-      inStock: p.availabilityStatus !== 'OUT_OF_STOCK', isPenny: curr <= 0.01, category: String(p.category ?? p.categoryPath ?? '') }]
+      productUrl: node.canonicalUrl ? `https://www.walmart.ca${node.canonicalUrl}` : undefined,
+      inStock: node.availabilityStatus !== 'OUT_OF_STOCK', isPenny: curr <= 0.01, category: String(node.category ?? node.categoryPath ?? '') }]
   })
 }
 
@@ -116,9 +151,8 @@ async function wmClearance(province: string): Promise<ClearanceItem[]> {
 async function ctClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('canadiantire', 'Canadian Tire', province)
   const html = await fetchHtml('https://www.canadiantire.ca/en/clearance.html')
-  const nd = extractNextData(html)
-  const products = (findByKeys(nd, ['products', 'items', 'results', 'catalogItems']) ?? []) as Record<string, unknown>[]
-  if (!products.length) throw new Error('No product data in page')
+  const products = extractProducts(html, ['products', 'items', 'results', 'catalogItems', 'productList', 'skus'])
+  if (!products.length) throw new Error('No product data in page — store may have changed its structure')
   return products.flatMap(p => {
     const price = (p.price as Record<string, unknown>) ?? {}
     const wasPrice = (price.wasPrice as Record<string, unknown>) ?? {}
@@ -145,9 +179,8 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
 async function bbClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('bestbuy', 'Best Buy', province)
   const html = await fetchHtml('https://www.bestbuy.ca/en-ca/clearance')
-  const nd = extractNextData(html)
-  const products = (findByKeys(nd, ['products', 'items', 'results', 'catalogItems', 'entities']) ?? []) as Record<string, unknown>[]
-  if (!products.length) throw new Error('No product data in page')
+  const products = extractProducts(html, ['products', 'items', 'results', 'catalogItems', 'entities', 'skus', 'productList'])
+  if (!products.length) throw new Error('No product data in page — store may have changed its structure')
   return products.flatMap(p => {
     const curr = Number(p.salePrice ?? p.lowPrice ?? p.currentPrice ?? p.price ?? 0)
     const orig = Number(p.regularPrice ?? p.originalPrice ?? p.wasPrice ?? 0)
