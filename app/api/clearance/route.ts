@@ -10,31 +10,44 @@ const PROVINCE_MAP: Record<string, string> = {
   R: 'MB', S: 'SK', T: 'AB', V: 'BC', X: 'NT', Y: 'YT',
 }
 
-function proxied(url: string) {
+function proxied(url: string, render = true, wait = 3000) {
   const key = process.env.SCRAPER_API_KEY
   if (!key) return url
-  // render=true executes JavaScript so we get the fully-rendered DOM, not just initial HTML
-  // wait=5000 gives React/Next.js 5 extra seconds to mount product lists
-  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&render=true&wait=5000&country_code=ca&device_type=desktop`
+  const params = `api_key=${key}&url=${encodeURIComponent(url)}&country_code=ca&device_type=desktop`
+  return render
+    ? `https://api.scraperapi.com?${params}&render=true&wait=${wait}`
+    : `https://api.scraperapi.com?${params}`
 }
 
-async function fetchHtml(url: string): Promise<string> {
-  const res = await fetch(proxied(url), {
+async function fetchHtml(url: string, render = true, wait = 3000): Promise<string> {
+  const res = await fetch(proxied(url, render, wait), {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
       'Accept-Language': 'en-CA,en;q=0.9',
     },
-    signal: AbortSignal.timeout(55000),
+    signal: AbortSignal.timeout(50000),
   })
   if (!res.ok) {
-    // Include preview of the response so error messages are more helpful
     const preview = await res.text().then(t =>
       t.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 250)
     ).catch(() => '')
     throw new Error(`HTTP ${res.status}${preview ? ` — ${preview}` : ''}`)
   }
   return res.text()
+}
+
+async function fetchJson(url: string): Promise<unknown> {
+  const res = await fetch(proxied(url, false), {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'application/json, */*',
+      'Accept-Language': 'en-CA,en;q=0.9',
+    },
+    signal: AbortSignal.timeout(20000),
+  })
+  if (!res.ok) throw new Error(`API HTTP ${res.status}`)
+  return res.json()
 }
 
 // Extract Next.js embedded page data
@@ -103,9 +116,21 @@ function fakeStore(storeId: StoreId, label: string, province: string): StoreLoca
 // ─── HOME DEPOT ──────────────────────────────────────────────────────────────
 async function hdClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('homedepot', 'Home Depot', province)
-  const html = await fetchHtml('https://www.homedepot.ca/en/home/special-buys/clearance.html')
-  const products = extractProducts(html, ['products', 'items', 'results', 'skus', 'productList', 'catalogItems', 'data'])
-  if (!products.length) throw new Error('No product data in page — store may have changed its structure')
+  // HD's clearance page loads products via client-side API call.
+  // Call that JSON API directly — much faster than render=true on the HTML page.
+  const json = await fetchJson(
+    'https://www.homedepot.ca/api/2.0/page/category-listing?N=4294967206&Nrpp=48&storeId=7139&catalogId=10051&langId=-1'
+  ).catch(() => null)
+  let products: Record<string, unknown>[] = []
+  if (json) {
+    products = (findByKeys(json, ['products', 'items', 'results', 'skus', 'productList', 'catalogItems']) ?? []) as Record<string, unknown>[]
+  }
+  if (!products.length) {
+    // Fallback: scrape the HTML page (render=false is fast, products might be in __NEXT_DATA__)
+    const html = await fetchHtml('https://www.homedepot.ca/en/home/special-buys/clearance.html', false)
+    products = extractProducts(html, ['products', 'items', 'results', 'skus', 'productList', 'catalogItems', 'data'])
+  }
+  if (!products.length) throw new Error('No product data in page — HD structure may have changed')
   return products.flatMap(p => {
     const pr = (p.pricing as Record<string, unknown>) ?? (p.price as Record<string, unknown>) ?? {}
     const orig = Number(pr.wasPrice ?? pr.originalPrice ?? pr.regularPrice ?? p.wasPrice ?? 0)
@@ -125,7 +150,8 @@ async function hdClearance(province: string): Promise<ClearanceItem[]> {
 // ─── WALMART ─────────────────────────────────────────────────────────────────
 async function wmClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('walmart', 'Walmart', province)
-  const html = await fetchHtml('https://www.walmart.ca/en/clearance')
+  // /en/clearance is a 404 — walmart.ca uses faceted search for clearance items
+  const html = await fetchHtml('https://www.walmart.ca/search?facets%5B%5D=specialOffer%3AClearance', true, 3000)
   const products = extractProducts(html, ['items', 'products', 'itemStacks', 'results', 'skus', 'nodes', 'edges', 'searchResult'])
   if (!products.length) throw new Error('No product data in page — store may have changed its structure')
   return products.flatMap(p => {
@@ -150,7 +176,8 @@ async function wmClearance(province: string): Promise<ClearanceItem[]> {
 // ─── CANADIAN TIRE ────────────────────────────────────────────────────────────
 async function ctClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('canadiantire', 'Canadian Tire', province)
-  const html = await fetchHtml('https://www.canadiantire.ca/en/clearance.html')
+  // /en/clearance.html is a 404 — try without extension, or their sale/clearance section
+  const html = await fetchHtml('https://www.canadiantire.ca/en/clearance', true, 3000)
   const products = extractProducts(html, ['products', 'items', 'results', 'catalogItems', 'productList', 'skus'])
   if (!products.length) throw new Error('No product data in page — store may have changed its structure')
   return products.flatMap(p => {
@@ -178,7 +205,8 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
 // ─── BEST BUY ─────────────────────────────────────────────────────────────────
 async function bbClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('bestbuy', 'Best Buy', province)
-  const html = await fetchHtml('https://www.bestbuy.ca/en-ca/clearance')
+  // /en-ca/clearance is a 404 — BB Canada clearance is under /collection/
+  const html = await fetchHtml('https://www.bestbuy.ca/en-ca/collection/clearance/cat_clearance', true, 3000)
   const products = extractProducts(html, ['products', 'items', 'results', 'catalogItems', 'entities', 'skus', 'productList'])
   if (!products.length) throw new Error('No product data in page — store may have changed its structure')
   return products.flatMap(p => {
