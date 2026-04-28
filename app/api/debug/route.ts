@@ -29,18 +29,38 @@ export async function GET(req: NextRequest) {
     const text = await res.text()
     const resHeaders: Record<string, string> = {}
     res.headers.forEach((v, k) => { resHeaders[k] = v })
+    // Search for data patterns to understand what framework/state the page uses
+    const dataPatterns = {
+      hasNextData: text.includes('__NEXT_DATA__'),
+      hasAngularState: text.includes('ng-state') || text.includes('__APP_STATE__') || text.includes('__TRANSFER_STATE__'),
+      hasDigitalData: text.includes('digitalData') || text.includes('window.digitalData'),
+      hasJsonLd: text.includes('application/ld+json'),
+      hasCloudflare: text.includes('cf-browser-verification') || text.includes('Checking your browser') || text.includes('Just a moment') || text.includes('cf_chl'),
+      hasCurrentPrice: text.includes('"currentPrice"') || text.includes('"salePrice"'),
+      hasWasPrice: text.includes('"wasPrice"') || text.includes('"originalPrice"') || text.includes('"regularPrice"'),
+      hasSku: text.includes('"sku"') || text.includes('"productId"') || text.includes('"itemId"'),
+      hasItemStacks: text.includes('itemStacks'),
+      hasProducts: text.includes('"products"') || text.includes('"items"'),
+    }
+    // Find Angular transfer state if present
+    let ngState = null
+    const ngMatch = text.match(/<script[^>]+id=["']ng-state["'][^>]*>([\s\S]*?)<\/script>/i)
+    if (ngMatch) {
+      try { ngState = JSON.parse(ngMatch[1])  } catch { ngState = ngMatch[1].slice(0, 500) }
+    }
     return NextResponse.json({
       scraperApiKeySet: !!key,
       scraperApiKeyPrefix: key ? key.slice(0, 6) + '...' : null,
       targetUrl: url,
+      finalUrl: resHeaders['sa-final-url'] ?? null,
+      creditCost: resHeaders['sa-credit-cost'] ?? null,
       status: res.status,
       ok: res.ok,
       contentType: resHeaders['content-type'] ?? null,
       bodyLength: text.length,
-      hasNextData: text.includes('__NEXT_DATA__'),
-      hasCloudflare: text.includes('cf-browser-verification') || text.includes('Checking your browser') || text.includes('Just a moment'),
-      bodyPreview: text.slice(0, 4000),
-      responseHeaders: resHeaders,
+      dataPatterns,
+      ngState,
+      bodyPreview: text.slice(0, 3000),
     })
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err), targetUrl: url })

@@ -140,15 +140,35 @@ async function hdClearance(province: string): Promise<ClearanceItem[]> {
 }
 
 // ─── WALMART ─────────────────────────────────────────────────────────────────
-// Walmart.ca uses Next.js with SSR — product data is embedded in __NEXT_DATA__
-// even with render=false. We use the clearance facet filter on their search page.
+// Walmart.ca uses Next.js with SSR. The canonical clearance page URL is
+// /en/shop/clearance/6000204800999 and products are nested in
+// __NEXT_DATA__.props.pageProps.initialData.searchResult.itemStacks[n].items
 async function wmClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('walmart', 'Walmart', province)
-  const html = await getHtml('https://www.walmart.ca/search?facets%5B%5D=specialOffer%3AClearance')
+  // The search?q=clearance URL redirects to this canonical clearance category page
+  const html = await getHtml('https://www.walmart.ca/en/shop/clearance/6000204800999')
   const nd = extractNextData(html)
   if (!nd) throw new Error('No __NEXT_DATA__ found — Walmart page structure may have changed')
-  const products = (findByKeys(nd, ['items', 'products', 'itemStacks', 'results', 'skus', 'nodes', 'edges']) ?? []) as Record<string, unknown>[]
-  if (!products.length) throw new Error(`No product data in Walmart page — keys available: ${Object.keys((nd.props as Record<string,unknown> ?? {})).join(', ')}`)
+
+  // Walmart nests products inside itemStacks[n].items — handle that specifically
+  let products: Record<string, unknown>[] = []
+  const stacks = findByKeys(nd, ['itemStacks']) as Record<string, unknown>[] | null
+  if (stacks?.length) {
+    for (const stack of stacks) {
+      const items = Array.isArray((stack as Record<string, unknown>).items)
+        ? (stack as Record<string, unknown>).items as Record<string, unknown>[]
+        : []
+      products.push(...items)
+    }
+  }
+  if (!products.length) {
+    products = (findByKeys(nd, ['items', 'products', 'results']) ?? []) as Record<string, unknown>[]
+  }
+  if (!products.length) {
+    // Expose top-level keys for debugging
+    const pp = (nd.props as Record<string, unknown>)
+    throw new Error(`No product data in Walmart page. Top-level props keys: ${Object.keys(pp ?? {}).join(', ')}`)
+  }
   return products.flatMap(p => {
     const node = (p.node as Record<string, unknown>) ?? p
     const pi = (node.priceInfo as Record<string, unknown>) ?? (node.price as Record<string, unknown>) ?? {}
