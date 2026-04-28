@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { StoreId, StoreLocation, ClearanceItem } from '@/lib/types'
 
-// Node.js serverless runtime — 60s max, needed for render=true (JS execution via ScraperAPI)
 export const maxDuration = 60
 
 const PROVINCE_MAP: Record<string, string> = {
@@ -10,50 +9,43 @@ const PROVINCE_MAP: Record<string, string> = {
   R: 'MB', S: 'SK', T: 'AB', V: 'BC', X: 'NT', Y: 'YT',
 }
 
-function proxied(url: string, render = true, wait = 3000) {
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/html, */*;q=0.9',
+  'Accept-Language': 'en-CA,en;q=0.9',
+}
+
+// Proxy through ScraperAPI — render=false (fast, ~2s), no headless browser
+function proxied(url: string) {
   const key = process.env.SCRAPER_API_KEY
   if (!key) return url
-  const params = `api_key=${key}&url=${encodeURIComponent(url)}&country_code=ca&device_type=desktop`
-  return render
-    ? `https://api.scraperapi.com?${params}&render=true&wait=${wait}`
-    : `https://api.scraperapi.com?${params}`
+  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&country_code=ca&device_type=desktop`
 }
 
-async function fetchHtml(url: string, render = true, wait = 3000): Promise<string> {
-  const res = await fetch(proxied(url, render, wait), {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
-      'Accept-Language': 'en-CA,en;q=0.9',
-    },
-    signal: AbortSignal.timeout(50000),
+async function get(url: string, asJson = false): Promise<{ ok: boolean; status: number; text: string }> {
+  const res = await fetch(proxied(url), {
+    headers: { ...HEADERS, Accept: asJson ? 'application/json, */*' : 'text/html, */*;q=0.9' },
+    signal: AbortSignal.timeout(25000),
   })
-  if (!res.ok) {
-    const preview = await res.text().then(t =>
-      t.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 250)
-    ).catch(() => '')
-    throw new Error(`HTTP ${res.status}${preview ? ` — ${preview}` : ''}`)
-  }
-  return res.text()
+  const text = await res.text()
+  return { ok: res.ok, status: res.status, text }
 }
 
-async function fetchJson(url: string): Promise<unknown> {
-  const res = await fetch(proxied(url, false), {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept': 'application/json, */*',
-      'Accept-Language': 'en-CA,en;q=0.9',
-    },
-    signal: AbortSignal.timeout(20000),
-  })
-  if (!res.ok) throw new Error(`API HTTP ${res.status}`)
-  return res.json()
+async function getJson(url: string): Promise<unknown> {
+  const r = await get(url, true)
+  if (!r.ok) throw new Error(`API HTTP ${r.status} — ${r.text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150)}`)
+  try { return JSON.parse(r.text) } catch { throw new Error(`API returned non-JSON (${r.status}): ${r.text.slice(0, 150)}`) }
+}
+
+async function getHtml(url: string): Promise<string> {
+  const r = await get(url, false)
+  if (!r.ok) throw new Error(`HTTP ${r.status} — ${r.text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)}`)
+  return r.text
 }
 
 // Extract Next.js embedded page data
 function extractNextData(html: string): Record<string, unknown> | null {
-  const marker = '__NEXT_DATA__'
-  const start = html.indexOf(marker)
+  const start = html.indexOf('__NEXT_DATA__')
   if (start === -1) return null
   const jsonStart = html.indexOf('>', start) + 1
   const jsonEnd = html.indexOf('</script>', jsonStart)
@@ -61,18 +53,7 @@ function extractNextData(html: string): Record<string, unknown> | null {
   try { return JSON.parse(html.slice(jsonStart, jsonEnd)) as Record<string, unknown> } catch { return null }
 }
 
-// Extract all inline JSON blobs from <script> tags (catches window.__STATE__ etc.)
-function extractInlineJsonBlobs(html: string): unknown[] {
-  const blobs: unknown[] = []
-  const re = /<script[^>]*>\s*([\[{][\s\S]*?)\s*<\/script>/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(html)) !== null) {
-    try { blobs.push(JSON.parse(m[1])) } catch { /* ignore */ }
-  }
-  return blobs
-}
-
-// Recursively search nested objects for an array matching given key names
+// Recursively search nested objects/arrays for an array matching given key names
 function findByKeys(obj: unknown, keys: string[], depth = 0): unknown[] | null {
   if (depth > 10 || obj == null || typeof obj !== 'object') return null
   if (Array.isArray(obj)) {
@@ -93,18 +74,21 @@ function findByKeys(obj: unknown, keys: string[], depth = 0): unknown[] | null {
   return null
 }
 
-// Try all data sources in the HTML to find a product array
 function extractProducts(html: string, keys: string[]): Record<string, unknown>[] {
-  // 1. __NEXT_DATA__ (Next.js SSR)
   const nd = extractNextData(html)
   if (nd) {
     const found = findByKeys(nd, keys)
     if (found?.length) return found as Record<string, unknown>[]
   }
-  // 2. Any other inline JSON blobs (window.__STATE__, apollo cache, etc.)
-  for (const blob of extractInlineJsonBlobs(html)) {
-    const found = findByKeys(blob, keys)
-    if (found?.length) return found as Record<string, unknown>[]
+  // Also scan inline JSON blobs (window.__STATE__ etc.)
+  const re = /<script[^>]*>\s*([\[{][\s\S]*?)\s*<\/script>/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html)) !== null) {
+    try {
+      const blob = JSON.parse(m[1])
+      const found = findByKeys(blob, keys)
+      if (found?.length) return found as Record<string, unknown>[]
+    } catch { /* skip */ }
   }
   return []
 }
@@ -114,23 +98,31 @@ function fakeStore(storeId: StoreId, label: string, province: string): StoreLoca
 }
 
 // ─── HOME DEPOT ──────────────────────────────────────────────────────────────
+// HD Canada uses Bloomreach/ATG commerce. Their clearance PLP makes a JSON API
+// call to their product catalog. We replicate that call directly.
 async function hdClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('homedepot', 'Home Depot', province)
-  // HD's clearance page loads products via client-side API call.
-  // Call that JSON API directly — much faster than render=true on the HTML page.
-  const json = await fetchJson(
-    'https://www.homedepot.ca/api/2.0/page/category-listing?N=4294967206&Nrpp=48&storeId=7139&catalogId=10051&langId=-1'
-  ).catch(() => null)
+  // Try their internal product listing API first (fast, render=false JSON)
+  // N=4294967206 is the Endeca/Bloomreach root clearance category nav state
+  const apiUrls = [
+    `https://www.homedepot.ca/api/2.0/page/category-listing?N=4294967206&Nrpp=48&storeId=7139&catalogId=10051&langId=-1`,
+    `https://www.homedepot.ca/api/2.0/page/category-listing?q=clearance&Nrpp=48&storeId=7139`,
+  ]
+  let json: unknown = null
+  for (const url of apiUrls) {
+    json = await getJson(url).catch(e => { console.error('[HD API]', url, e.message); return null })
+    if (json) break
+  }
   let products: Record<string, unknown>[] = []
   if (json) {
-    products = (findByKeys(json, ['products', 'items', 'results', 'skus', 'productList', 'catalogItems']) ?? []) as Record<string, unknown>[]
+    products = (findByKeys(json, ['products', 'items', 'results', 'skus', 'productList', 'records', 'Product']) ?? []) as Record<string, unknown>[]
   }
   if (!products.length) {
-    // Fallback: scrape the HTML page (render=false is fast, products might be in __NEXT_DATA__)
-    const html = await fetchHtml('https://www.homedepot.ca/en/home/special-buys/clearance.html', false)
-    products = extractProducts(html, ['products', 'items', 'results', 'skus', 'productList', 'catalogItems', 'data'])
+    // Fallback: parse the HTML clearance page (render=false, products may be in initial HTML)
+    const html = await getHtml('https://www.homedepot.ca/en/home/special-buys/clearance.html')
+    products = extractProducts(html, ['products', 'items', 'results', 'skus', 'productList', 'records'])
   }
-  if (!products.length) throw new Error('No product data in page — HD structure may have changed')
+  if (!products.length) throw new Error('No product data — HD API response structure may have changed')
   return products.flatMap(p => {
     const pr = (p.pricing as Record<string, unknown>) ?? (p.price as Record<string, unknown>) ?? {}
     const orig = Number(pr.wasPrice ?? pr.originalPrice ?? pr.regularPrice ?? p.wasPrice ?? 0)
@@ -148,20 +140,22 @@ async function hdClearance(province: string): Promise<ClearanceItem[]> {
 }
 
 // ─── WALMART ─────────────────────────────────────────────────────────────────
+// Walmart.ca uses Next.js with SSR — product data is embedded in __NEXT_DATA__
+// even with render=false. We use the clearance facet filter on their search page.
 async function wmClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('walmart', 'Walmart', province)
-  // /en/clearance is a 404 — walmart.ca uses faceted search for clearance items
-  const html = await fetchHtml('https://www.walmart.ca/search?facets%5B%5D=specialOffer%3AClearance', true, 3000)
-  const products = extractProducts(html, ['items', 'products', 'itemStacks', 'results', 'skus', 'nodes', 'edges', 'searchResult'])
-  if (!products.length) throw new Error('No product data in page — store may have changed its structure')
+  const html = await getHtml('https://www.walmart.ca/search?facets%5B%5D=specialOffer%3AClearance')
+  const nd = extractNextData(html)
+  if (!nd) throw new Error('No __NEXT_DATA__ found — Walmart page structure may have changed')
+  const products = (findByKeys(nd, ['items', 'products', 'itemStacks', 'results', 'skus', 'nodes', 'edges']) ?? []) as Record<string, unknown>[]
+  if (!products.length) throw new Error(`No product data in Walmart page — keys available: ${Object.keys((nd.props as Record<string,unknown> ?? {})).join(', ')}`)
   return products.flatMap(p => {
     const node = (p.node as Record<string, unknown>) ?? p
     const pi = (node.priceInfo as Record<string, unknown>) ?? (node.price as Record<string, unknown>) ?? {}
     const orig = Number(pi.wasPrice ?? pi.listPrice ?? pi.regularPrice ?? node.wasPrice ?? 0)
     const curr = Number(pi.currentPrice ?? pi.salePrice ?? node.currentPrice ?? node.salePrice ?? node.price ?? 0)
     if (!curr) return []
-    const imgs = Array.isArray(node.imageInfo) ? node.imageInfo as Record<string, unknown>[] : []
-    const imgUrl = (node.imageInfo as Record<string, unknown>)?.thumbnailUrl ?? imgs[0]?.url ?? node.image ?? node.imageUrl
+    const imgUrl = (node.imageInfo as Record<string, unknown>)?.thumbnailUrl ?? node.image ?? node.imageUrl
     return [{ id: `wm-${node.itemId ?? node.id ?? node.sku}`, storeId: 'walmart' as const, storeLocation: store,
       name: String(node.name ?? node.description ?? ''), brand: String(node.brand ?? node.brandName ?? ''),
       sku: String(node.itemId ?? node.id ?? node.sku ?? ''),
@@ -174,17 +168,42 @@ async function wmClearance(province: string): Promise<ClearanceItem[]> {
 }
 
 // ─── CANADIAN TIRE ────────────────────────────────────────────────────────────
+// CT uses their own product search API at api.canadiantire.ca — returns JSON directly.
 async function ctClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('canadiantire', 'Canadian Tire', province)
-  // /en/clearance.html is a 404 — try without extension, or their sale/clearance section
-  const html = await fetchHtml('https://www.canadiantire.ca/en/clearance', true, 3000)
-  const products = extractProducts(html, ['products', 'items', 'results', 'catalogItems', 'productList', 'skus'])
-  if (!products.length) throw new Error('No product data in page — store may have changed its structure')
+  const apiUrls = [
+    `https://api.canadiantire.ca/search/api/v0/search?q=clearance&page=0&pageSize=48&language=en&site=CTR&storeId=0248`,
+    `https://api.canadiantire.ca/product-catalog/v1/en/products?q=clearance&page=0&pageSize=48&storeId=0248`,
+  ]
+  let json: unknown = null
+  for (const url of apiUrls) {
+    json = await getJson(url).catch(e => { console.error('[CT API]', url, e.message); return null })
+    if (json) break
+  }
+  let products: Record<string, unknown>[] = []
+  if (json) {
+    products = (findByKeys(json, ['products', 'items', 'results', 'catalogItems', 'skus', 'records']) ?? []) as Record<string, unknown>[]
+  }
+  if (!products.length) {
+    // HTML fallback — try a few known URL patterns for CT's clearance section
+    const htmlUrls = [
+      'https://www.canadiantire.ca/en/clearance-sale.html',
+      'https://www.canadiantire.ca/en/sale-clearance.html',
+      'https://www.canadiantire.ca/en/sale.html',
+    ]
+    for (const url of htmlUrls) {
+      const html = await getHtml(url).catch(() => '')
+      if (!html) continue
+      products = extractProducts(html, ['products', 'items', 'results', 'catalogItems', 'skus'])
+      if (products.length) break
+    }
+  }
+  if (!products.length) throw new Error('No product data — CT API/page structure may have changed')
   return products.flatMap(p => {
     const price = (p.price as Record<string, unknown>) ?? {}
     const wasPrice = (price.wasPrice as Record<string, unknown>) ?? {}
-    const orig = Number(wasPrice.value ?? price.wasPrice ?? p.wasPrice ?? 0)
-    const curr = Number(price.value ?? price.currentPrice ?? p.currentPrice ?? p.price ?? 0)
+    const orig = Number(wasPrice.value ?? price.wasPrice ?? p.wasPrice ?? p.regularPrice ?? 0)
+    const curr = Number(price.value ?? price.currentPrice ?? p.currentPrice ?? p.price ?? p.salePrice ?? 0)
     if (!curr) return []
     const imgs = Array.isArray(p.images) ? (p.images as Record<string, unknown>[]) : []
     const firstImg = (imgs[0] ?? {}) as Record<string, unknown>
@@ -203,12 +222,24 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
 }
 
 // ─── BEST BUY ─────────────────────────────────────────────────────────────────
+// BB Canada has a public JSON search API. We filter by clearanceSavings sort
+// which naturally surfaces only items with clearance pricing applied.
 async function bbClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('bestbuy', 'Best Buy', province)
-  // /en-ca/clearance is a 404 — BB Canada clearance is under /collection/
-  const html = await fetchHtml('https://www.bestbuy.ca/en-ca/collection/clearance/cat_clearance', true, 3000)
-  const products = extractProducts(html, ['products', 'items', 'results', 'catalogItems', 'entities', 'skus', 'productList'])
-  if (!products.length) throw new Error('No product data in page — store may have changed its structure')
+  const apiUrls = [
+    `https://www.bestbuy.ca/api/2.0/json/search?currentRegion=${province}&locale=en-CA&query=&pageSize=48&sortBy=clearanceSavings&sortDir=desc`,
+    `https://www.bestbuy.ca/api/2.0/json/search?currentRegion=ON&locale=en-CA&query=&pageSize=48&sortBy=clearanceSavings&sortDir=desc`,
+  ]
+  let json: unknown = null
+  for (const url of apiUrls) {
+    json = await getJson(url).catch(e => { console.error('[BB API]', url, e.message); return null })
+    if (json) break
+  }
+  let products: Record<string, unknown>[] = []
+  if (json) {
+    products = (findByKeys(json, ['products', 'items', 'results', 'catalogItems', 'entities', 'skus']) ?? []) as Record<string, unknown>[]
+  }
+  if (!products.length) throw new Error(`No product data — BB API may have changed. Raw: ${JSON.stringify(json)?.slice(0, 200) ?? 'null'}`)
   return products.flatMap(p => {
     const curr = Number(p.salePrice ?? p.lowPrice ?? p.currentPrice ?? p.price ?? 0)
     const orig = Number(p.regularPrice ?? p.originalPrice ?? p.wasPrice ?? 0)
@@ -240,7 +271,7 @@ export async function GET(req: NextRequest) {
   if (!storeId || !(storeId in SCRAPERS)) return NextResponse.json({ error: 'invalid store' }, { status: 400 })
   if (postal.length < 3) return NextResponse.json({ error: 'postal required' }, { status: 400 })
 
-  const province = PROVINCE_MAP[postal[0]] ?? 'CA'
+  const province = PROVINCE_MAP[postal[0]] ?? 'ON'
   const sc = SCRAPERS[storeId]
 
   try {
