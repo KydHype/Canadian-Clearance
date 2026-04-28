@@ -12,10 +12,16 @@ const BROWSER_HEADERS = {
   'Pragma': 'no-cache',
 }
 
+function proxied(url: string) {
+  const key = process.env.SCRAPER_API_KEY
+  if (!key) return url
+  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&render=false`
+}
+
 async function safeFetch(url: string, extraHeaders?: Record<string, string>) {
-  const res = await fetch(url, {
+  const res = await fetch(proxied(url), {
     headers: { ...BROWSER_HEADERS, ...extraHeaders },
-    signal: AbortSignal.timeout(8000),
+    signal: AbortSignal.timeout(15000),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
