@@ -12,7 +12,7 @@ const PROVINCE_MAP: Record<string, string> = {
 function proxied(url: string) {
   const key = process.env.SCRAPER_API_KEY
   if (!key) return url
-  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&render=false`
+  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&render=false&country_code=ca`
 }
 
 async function safeFetch(url: string, extra?: Record<string, string>) {
@@ -60,8 +60,8 @@ async function fetchStore(storeId: StoreId, province: string): Promise<Clearance
   if (storeId === 'walmart') {
     const store = fakeStore('walmart', 'Walmart', province)
     const data = await safeFetch(
-      'https://www.walmart.ca/api/2.0/page/search?q=clearance&c=0&facet=deal_type%3ANA%3ANA%3AClearance%3ANA%3ANA&pageSize=48',
-      { Referer: 'https://www.walmart.ca/', 'x-o-bu': 'WALMART-CA', 'x-o-mart': 'B2C' }
+      'https://www.walmart.ca/api/2.0/page/search?q=clearance&pageSize=48&lang=en',
+      { Referer: 'https://www.walmart.ca/' }
     )
     return ((data.items ?? data.products ?? data.results ?? []) as Record<string, unknown>[]).flatMap(p => {
       const pi = (p.priceInfo as Record<string, unknown>) ?? {}
@@ -83,7 +83,7 @@ async function fetchStore(storeId: StoreId, province: string): Promise<Clearance
   if (storeId === 'canadiantire') {
     const store = fakeStore('canadiantire', 'Canadian Tire', province)
     const data = await safeFetch(
-      'https://api.canadiantire.ca/search/api/v0/product/search/?q=clearance&pageSize=48&lang=en_CA&fields=FULL&sortBy=relevance',
+      'https://www.canadiantire.ca/api/search/v0/product/search/?q=clearance&pageSize=48&lang=en_CA&fields=FULL&sortBy=relevance',
       { Referer: 'https://www.canadiantire.ca/', baseSiteId: 'CTR' }
     )
     return ((data.products ?? data.results ?? []) as Record<string, unknown>[]).flatMap(p => {
@@ -112,7 +112,7 @@ async function fetchStore(storeId: StoreId, province: string): Promise<Clearance
   if (storeId === 'bestbuy') {
     const store = fakeStore('bestbuy', 'Best Buy', province)
     const data = await safeFetch(
-      'https://www.bestbuy.ca/api/2.0/page/search?currentRegion=CA&query=clearance&pageSize=48&sortBy=priceLowToHigh&lang=en-CA',
+      'https://www.bestbuy.ca/api/2.0/page/search?currentRegion=CA&query=clearance&pageSize=48&lang=en-CA',
       { Referer: 'https://www.bestbuy.ca/' }
     )
     return ((data.products ?? data.results ?? data.items ?? []) as Record<string, unknown>[]).flatMap(p => {
