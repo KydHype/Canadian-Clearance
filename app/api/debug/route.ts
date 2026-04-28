@@ -5,6 +5,7 @@ export const maxDuration = 30
 export async function GET(req: NextRequest) {
   const url = req.nextUrl.searchParams.get('url') ?? ''
   const snip = req.nextUrl.searchParams.get('snip') ?? '' // find this string and return surrounding context
+  const snipN = Math.max(1, parseInt(req.nextUrl.searchParams.get('snipN') ?? '1', 10)) // which occurrence (1-indexed)
   if (!url) return NextResponse.json({ error: 'url param required' }, { status: 400 })
 
   const key = process.env.SCRAPER_API_KEY
@@ -64,8 +65,13 @@ export async function GET(req: NextRequest) {
       bodyPreview: text.slice(0, 3000),
       // If snip= param given, find first occurrence and show surrounding 800 chars
       snipContext: snip ? (() => {
-        const idx = text.indexOf(snip)
-        if (idx === -1) return `"${snip}" not found in response`
+        let idx = -1
+        let searchFrom = 0
+        for (let i = 0; i < snipN; i++) {
+          idx = text.indexOf(snip, searchFrom)
+          if (idx === -1) return `"${snip}" occurrence #${snipN} not found (total occurrences: ${i})`
+          searchFrom = idx + 1
+        }
         const start = Math.max(0, idx - 200)
         const end = Math.min(text.length, idx + 600)
         return text.slice(start, end)
