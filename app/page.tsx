@@ -8,6 +8,7 @@ import SavedDrawer from '@/components/SavedDrawer'
 import { recordSeen, getFreshnessScore } from '@/lib/freshness'
 
 const ALL_STORES: StoreId[] = ['homedepot', 'walmart', 'canadiantire', 'bestbuy']
+const AVAILABLE_STORES: StoreId[] = ALL_STORES.filter(id => STORE_META[id].available)
 
 const DISCOUNT_OPTIONS = [
   { label: 'Any deal', value: 0 },
@@ -37,7 +38,7 @@ function useLocalStorage<T>(key: string, initial: T) {
 
 export default function Home() {
   const [postalCode, setPostalCode] = useLocalStorage('cc_postal', '')
-  const [selectedStores, setSelectedStores] = useLocalStorage<StoreId[]>('cc_stores', ALL_STORES)
+  const [selectedStores, setSelectedStores] = useLocalStorage<StoreId[]>('cc_stores', AVAILABLE_STORES)
   const [minDiscount, setMinDiscount] = useLocalStorage('cc_discount', 0)
   const [results, setResults] = useState<StoreResult[]>([])
   const [loading, setLoading] = useState(false)
@@ -49,6 +50,7 @@ export default function Home() {
   const savedIds = new Set(savedItems.map(i => i.id))
 
   function toggleStore(id: StoreId) {
+    if (!STORE_META[id].available) return
     setSelectedStores(prev =>
       prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
     )
@@ -57,7 +59,8 @@ export default function Home() {
   async function search() {
     const clean = postalCode.replace(/\s/g, '').toUpperCase()
     if (clean.length < 6) { setError('Enter a valid Canadian postal code'); return }
-    if (selectedStores.length === 0) { setError('Select at least one store'); return }
+    const scannable = selectedStores.filter(id => STORE_META[id].available)
+    if (scannable.length === 0) { setError('Select at least one available store'); return }
     setError('')
     setLoading(true)
     setHasSearched(true)
@@ -66,7 +69,7 @@ export default function Home() {
 
     // Fetch one store at a time — keeps each request under Vercel's 25s timeout
     // and respects ScraperAPI's 1 concurrent request limit on free plan
-    for (const storeId of selectedStores) {
+    for (const storeId of scannable) {
       // Add a loading placeholder so the UI shows the store is in progress
       setResults(prev => [...prev, { storeId, storeName: STORE_META[storeId].label, items: [], loading: true }])
       try {
@@ -141,18 +144,23 @@ export default function Home() {
             {ALL_STORES.map(id => {
               const meta = STORE_META[id]
               const active = selectedStores.includes(id)
+              const unavailable = !meta.available
               return (
                 <button
                   key={id}
                   onClick={() => toggleStore(id)}
+                  disabled={unavailable}
+                  title={unavailable ? 'Coming soon' : undefined}
                   className={`text-xs px-3 py-1 rounded-full border transition-colors font-medium ${
-                    active
+                    unavailable
+                      ? 'border-zinc-800 text-zinc-600 bg-transparent cursor-not-allowed'
+                      : active
                       ? 'border-transparent text-black'
                       : 'border-zinc-700 text-zinc-500 bg-transparent hover:border-zinc-500'
                   }`}
-                  style={active ? { backgroundColor: meta.color } : {}}
+                  style={active && !unavailable ? { backgroundColor: meta.color } : {}}
                 >
-                  {meta.label}
+                  {meta.label}{unavailable ? ' · soon' : ''}
                 </button>
               )
             })}
@@ -259,6 +267,7 @@ export default function Home() {
             <p className="text-5xl mb-4">🏷️</p>
             <p className="text-zinc-300 font-medium mb-1">Find hidden clearance items</p>
             <p className="text-zinc-500 text-sm">Enter your postal code and tap Scan</p>
+            <p className="text-zinc-600 text-xs mt-1">Currently supports Walmart Canada · more stores coming soon</p>
             <div className="mt-6 text-left bg-zinc-900 rounded-xl p-4 text-xs text-zinc-500 max-w-xs mx-auto space-y-1.5">
               <p className="text-zinc-400 font-semibold mb-2">How it works</p>
               <p>• Enter your postal code to find nearby stores</p>
