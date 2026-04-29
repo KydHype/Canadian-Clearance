@@ -245,19 +245,13 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
     const keys = json && typeof json === 'object' ? Object.keys(json as object).join(', ') : String(json).slice(0, 100)
     throw new Error(`CT: no products in response. Top-level keys: ${keys}`)
   }
-  // Diagnostic: expose currentPrice value from first product
-  if (products.length > 0) {
-    const s = products[0]
-    const skuSample = Array.isArray(s.skus) ? (s.skus as unknown[])[0] : undefined
-    throw new Error(`CT debug — currentPrice: ${JSON.stringify(s.currentPrice)} | skus[0]: ${JSON.stringify(skuSample)?.slice(0, 200)}`)
-  }
   return products.flatMap(p => {
-    // CT puts currentPrice directly on the product; wasPrice is in skus[0]
-    const curr = Number(p.currentPrice ?? 0)
+    // currentPrice is an object: {value, minPrice, maxPrice} — value is null for multi-SKU products
+    const priceObj = (p.currentPrice as Record<string, unknown>) ?? {}
+    const curr = Number(priceObj.value ?? priceObj.minPrice ?? priceObj.maxPrice ?? 0)
     if (!curr) return []
-    const skuList = Array.isArray(p.skus) ? (p.skus as Record<string, unknown>[]) : []
-    const firstSku = (skuList[0] ?? {}) as Record<string, unknown>
-    const orig = Number(p.wasPrice ?? firstSku.wasPrice ?? firstSku.regularPrice ?? firstSku.listPrice ?? 0)
+    const wasPriceObj = (p.wasPrice as Record<string, unknown>) ?? {}
+    const orig = Number(wasPriceObj.value ?? wasPriceObj.minPrice ?? wasPriceObj.maxPrice ?? 0)
     const imgs = Array.isArray(p.images) ? (p.images as Record<string, unknown>[]) : []
     const firstImg = (imgs[0] ?? {}) as Record<string, unknown>
     const imgUrl = String(firstImg.url ?? firstImg.src ?? p.imageUrl ?? '')
