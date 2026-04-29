@@ -213,7 +213,6 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
     pagetype: 'promolisting',
     'browse-mode': 'OFF',
     devicetype: 'd',
-    experience: 'clearance',
     light: 'true',
   })
   const ctTargetUrl = `https://www.canadiantire.ca/api/v1/search/v2/search?${ctParams}`
@@ -229,6 +228,7 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
       'ocp-apim-subscription-key': 'c01ef3612328420c9f5cd9277e815a0e',
       'bannerid': 'CTR',
       'basesiteid': 'CTR',
+      'experience': 'clearance',
       'service-client': 'ctr/web',
       'service-version': 'v1',
       'User-Agent': HEADERS['User-Agent'],
