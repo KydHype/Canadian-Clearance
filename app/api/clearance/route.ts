@@ -216,7 +216,14 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
     experience: 'clearance',
     light: 'true',
   })
-  const res = await fetch(`https://www.canadiantire.ca/api/v1/search/v2/search?${ctParams}`, {
+  const ctTargetUrl = `https://www.canadiantire.ca/api/v1/search/v2/search?${ctParams}`
+  const saKey = process.env.SCRAPER_API_KEY
+  // Route through ScraperAPI with keep_headers=true so Akamai sees a residential CA IP
+  // and our custom headers (ocp-apim-subscription-key etc.) are forwarded unchanged
+  const ctFetchUrl = saKey
+    ? `https://api.scraperapi.com?api_key=${saKey}&url=${encodeURIComponent(ctTargetUrl)}&country_code=ca&keep_headers=true`
+    : ctTargetUrl
+  const res = await fetch(ctFetchUrl, {
     headers: {
       'Accept': 'application/json, text/plain, */*',
       'ocp-apim-subscription-key': 'c01ef3612328420c9f5cd9277e815a0e',
