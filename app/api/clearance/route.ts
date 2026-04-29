@@ -45,7 +45,10 @@ async function getHtml(url: string): Promise<string> {
 
 // Extract Next.js embedded page data
 function extractNextData(html: string): Record<string, unknown> | null {
-  const start = html.indexOf('__NEXT_DATA__')
+  // Prefer the exact script tag — avoids matching window.__NEXT_DATA__ variable references
+  // earlier in the page which point at wrong </script> boundaries and break JSON.parse
+  const tagStart = html.indexOf('<script id="__NEXT_DATA__"')
+  const start = tagStart !== -1 ? tagStart : html.indexOf('__NEXT_DATA__')
   if (start === -1) return null
   const jsonStart = html.indexOf('>', start) + 1
   const jsonEnd = html.indexOf('</script>', jsonStart)
