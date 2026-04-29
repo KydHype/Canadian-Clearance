@@ -246,32 +246,28 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
     const keys = json && typeof json === 'object' ? Object.keys(json as object).join(', ') : String(json).slice(0, 100)
     throw new Error(`CT: no products in response. Top-level keys: ${keys}`)
   }
-  const mapped = products.flatMap(p => {
-    const price = (p.price as Record<string, unknown>) ?? {}
-    const wasPrice = (price.wasPrice as Record<string, unknown>) ?? {}
-    const orig = Number(wasPrice.value ?? price.wasPrice ?? p.wasPrice ?? p.regularPrice ?? 0)
-    const curr = Number(price.value ?? price.currentPrice ?? p.salePrice ?? p.currentPrice ?? p.price ?? 0)
+  return products.flatMap(p => {
+    // CT puts currentPrice directly on the product; wasPrice is in skus[0]
+    const curr = Number(p.currentPrice ?? 0)
     if (!curr) return []
+    const skuList = Array.isArray(p.skus) ? (p.skus as Record<string, unknown>[]) : []
+    const firstSku = (skuList[0] ?? {}) as Record<string, unknown>
+    const orig = Number(p.wasPrice ?? firstSku.wasPrice ?? firstSku.regularPrice ?? firstSku.listPrice ?? 0)
     const imgs = Array.isArray(p.images) ? (p.images as Record<string, unknown>[]) : []
     const firstImg = (imgs[0] ?? {}) as Record<string, unknown>
-    const imgUrl = String(firstImg.url ?? p.imageUrl ?? p.thumbnailImage ?? '')
+    const imgUrl = String(firstImg.url ?? firstImg.src ?? p.imageUrl ?? '')
     const brand = (p.brand as Record<string, unknown>) ?? {}
-    const cats = Array.isArray(p.categories) ? (p.categories as Record<string, unknown>[]) : []
-    const firstCat = (cats[0] ?? {}) as Record<string, unknown>
-    return [{ id: `ct-${p.code ?? p.id ?? p.pid}`, storeId: 'canadiantire' as const, storeLocation: store,
-      name: String(p.name ?? p.title ?? p.description ?? ''), brand: String(brand.name ?? p.brandName ?? ''),
-      sku: String(p.code ?? p.id ?? p.pid ?? ''),
+    const crumbs = Array.isArray(p.breadcrumbList) ? (p.breadcrumbList as Record<string, unknown>[]) : []
+    const lastCrumb = (crumbs[crumbs.length - 1] ?? {}) as Record<string, unknown>
+    return [{ id: `ct-${p.code ?? p.skuId ?? p.partNumber}`, storeId: 'canadiantire' as const, storeLocation: store,
+      name: String(p.title ?? p.name ?? ''), brand: String(brand.name ?? p.brandName ?? ''),
+      sku: String(p.code ?? p.skuId ?? p.partNumber ?? ''),
       originalPrice: orig || curr, clearancePrice: curr,
       discountPercent: orig > curr ? Math.round((1 - curr / orig) * 100) : 0,
       imageUrl: imgUrl ? (imgUrl.startsWith('http') ? imgUrl : `https://cdn.canadiantire.ca${imgUrl}`) : undefined,
       productUrl: p.url ? `https://www.canadiantire.ca${p.url}` : undefined,
-      inStock: true, isPenny: curr <= 0.01, category: String(firstCat.name ?? p.category ?? '') }]
+      inStock: true, isPenny: curr <= 0.01, category: String(lastCrumb.name ?? '') }]
   })
-  if (!mapped.length) {
-    const s = products[0] ?? {}
-    throw new Error(`CT: ${products.length} products found but price=0 for all. First item keys: ${Object.keys(s).join(', ')} | price field: ${JSON.stringify(s.price)?.slice(0, 150)}`)
-  }
-  return mapped
 }
 
 // ─── BEST BUY ─────────────────────────────────────────────────────────────────
