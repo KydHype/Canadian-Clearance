@@ -192,54 +192,71 @@ async function wmClearance(province: string): Promise<ClearanceItem[]> {
 }
 
 // ─── CANADIAN TIRE ────────────────────────────────────────────────────────────
-// CT uses their own product search API at api.canadiantire.ca — returns JSON directly.
+// CT exposes an internal Azure API Management endpoint on the same domain.
+// The subscription key is the shared frontend key embedded in the web app.
+// Experience header = 'clearance' returns only clearance-priced items.
+const CT_STORE_BY_PROVINCE: Record<string, string> = {
+  BC: '389', AB: '117', SK: '509', MB: '449',
+  ON: '248', QC: '450', NB: '300', NS: '301', PE: '302', NL: '303',
+  NT: '389', YT: '389',
+}
+
 async function ctClearance(province: string): Promise<ClearanceItem[]> {
+  const storeId = CT_STORE_BY_PROVINCE[province] ?? '389'
   const store = fakeStore('canadiantire', 'Canadian Tire', province)
-  const apiUrls = [
-    `https://api.canadiantire.ca/search/api/v0/search?q=clearance&page=0&pageSize=48&language=en&site=CTR&storeId=0248`,
-    `https://api.canadiantire.ca/product-catalog/v1/en/products?q=clearance&page=0&pageSize=48&storeId=0248`,
-  ]
-  let json: unknown = null
-  for (const url of apiUrls) {
-    json = await getJson(url).catch(e => { console.error('[CT API]', url, e.message); return null })
-    if (json) break
+
+  const ctParams = new URLSearchParams({
+    store: storeId,
+    q: 'store clearance',
+    count: '48',
+    lang: 'en_CA',
+    pagetype: 'promolisting',
+    'browse-mode': 'OFF',
+    devicetype: 'd',
+    experience: 'clearance',
+    light: 'true',
+  })
+  const res = await fetch(`https://www.canadiantire.ca/api/v1/search/v2/search?${ctParams}`, {
+    headers: {
+      'Accept': 'application/json, text/plain, */*',
+      'ocp-apim-subscription-key': 'c01ef3612328420c9f5cd9277e815a0e',
+      'bannerid': 'CTR',
+      'basesiteid': 'CTR',
+      'service-client': 'ctr/web',
+      'service-version': 'v1',
+      'User-Agent': HEADERS['User-Agent'],
+      'Referer': 'https://www.canadiantire.ca/',
+    },
+    signal: AbortSignal.timeout(25000),
+  })
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`CT API ${res.status}: ${body.replace(/<[^>]+>/g, ' ').trim().slice(0, 150)}`)
   }
-  let products: Record<string, unknown>[] = []
-  if (json) {
-    products = (findByKeys(json, ['products', 'items', 'results', 'catalogItems', 'skus', 'records']) ?? []) as Record<string, unknown>[]
-  }
+  const json = await res.json() as unknown
+  const products = (findByKeys(json, ['products', 'items', 'results', 'docs', 'catalogItems', 'skus']) ?? []) as Record<string, unknown>[]
   if (!products.length) {
-    // HTML fallback — try a few known URL patterns for CT's clearance section
-    const htmlUrls = [
-      'https://www.canadiantire.ca/en/clearance-sale.html',
-      'https://www.canadiantire.ca/en/sale-clearance.html',
-      'https://www.canadiantire.ca/en/sale.html',
-    ]
-    for (const url of htmlUrls) {
-      const html = await getHtml(url).catch(() => '')
-      if (!html) continue
-      products = extractProducts(html, ['products', 'items', 'results', 'catalogItems', 'skus'])
-      if (products.length) break
-    }
+    const keys = json && typeof json === 'object' ? Object.keys(json as object).join(', ') : String(json).slice(0, 100)
+    throw new Error(`CT: no products in response. Top-level keys: ${keys}`)
   }
-  if (!products.length) throw new Error('No product data — CT API/page structure may have changed')
   return products.flatMap(p => {
     const price = (p.price as Record<string, unknown>) ?? {}
     const wasPrice = (price.wasPrice as Record<string, unknown>) ?? {}
     const orig = Number(wasPrice.value ?? price.wasPrice ?? p.wasPrice ?? p.regularPrice ?? 0)
-    const curr = Number(price.value ?? price.currentPrice ?? p.currentPrice ?? p.price ?? p.salePrice ?? 0)
+    const curr = Number(price.value ?? price.currentPrice ?? p.salePrice ?? p.currentPrice ?? p.price ?? 0)
     if (!curr) return []
     const imgs = Array.isArray(p.images) ? (p.images as Record<string, unknown>[]) : []
     const firstImg = (imgs[0] ?? {}) as Record<string, unknown>
+    const imgUrl = String(firstImg.url ?? p.imageUrl ?? p.thumbnailImage ?? '')
     const brand = (p.brand as Record<string, unknown>) ?? {}
     const cats = Array.isArray(p.categories) ? (p.categories as Record<string, unknown>[]) : []
     const firstCat = (cats[0] ?? {}) as Record<string, unknown>
-    return [{ id: `ct-${p.code ?? p.sku ?? p.id}`, storeId: 'canadiantire' as const, storeLocation: store,
-      name: String(p.name ?? p.description ?? ''), brand: String(brand.name ?? p.brandName ?? ''),
-      sku: String(p.code ?? p.sku ?? ''),
+    return [{ id: `ct-${p.code ?? p.id ?? p.pid}`, storeId: 'canadiantire' as const, storeLocation: store,
+      name: String(p.name ?? p.title ?? p.description ?? ''), brand: String(brand.name ?? p.brandName ?? ''),
+      sku: String(p.code ?? p.id ?? p.pid ?? ''),
       originalPrice: orig || curr, clearancePrice: curr,
       discountPercent: orig > curr ? Math.round((1 - curr / orig) * 100) : 0,
-      imageUrl: firstImg.url ? `https://cdn.canadiantire.ca${firstImg.url}` : p.imageUrl ? String(p.imageUrl) : undefined,
+      imageUrl: imgUrl ? (imgUrl.startsWith('http') ? imgUrl : `https://cdn.canadiantire.ca${imgUrl}`) : undefined,
       productUrl: p.url ? `https://www.canadiantire.ca${p.url}` : undefined,
       inStock: true, isPenny: curr <= 0.01, category: String(firstCat.name ?? p.category ?? '') }]
   })
