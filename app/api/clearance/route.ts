@@ -176,8 +176,10 @@ async function wmClearance(province: string): Promise<ClearanceItem[]> {
   return products.flatMap(p => {
     const node = (p.node as Record<string, unknown>) ?? p
     const pi = (node.priceInfo as Record<string, unknown>) ?? (node.price as Record<string, unknown>) ?? {}
-    const orig = Number(pi.wasPrice ?? pi.listPrice ?? pi.regularPrice ?? node.wasPrice ?? 0)
-    const curr = Number(pi.currentPrice ?? pi.salePrice ?? node.currentPrice ?? node.salePrice ?? node.price ?? 0)
+    // minPrice is numeric; wasPrice is a "$X.XX" string — use savingsAmt to back-calc original
+    const curr = Number(pi.minPrice ?? pi.currentPrice ?? pi.salePrice ?? node.currentPrice ?? node.salePrice ?? node.price ?? 0)
+    const savingsAmt = Number(pi.savingsAmt ?? 0)
+    const orig = savingsAmt > 0 ? curr + savingsAmt : curr
     if (!curr) return []
     const imgUrl = (node.imageInfo as Record<string, unknown>)?.thumbnailUrl ?? node.image ?? node.imageUrl
     return [{ id: `wm-${node.itemId ?? node.id ?? node.sku}`, storeId: 'walmart' as const, storeLocation: store,
