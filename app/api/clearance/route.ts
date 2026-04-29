@@ -246,7 +246,7 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
     const keys = json && typeof json === 'object' ? Object.keys(json as object).join(', ') : String(json).slice(0, 100)
     throw new Error(`CT: no products in response. Top-level keys: ${keys}`)
   }
-  return products.flatMap(p => {
+  const mapped = products.flatMap(p => {
     const price = (p.price as Record<string, unknown>) ?? {}
     const wasPrice = (price.wasPrice as Record<string, unknown>) ?? {}
     const orig = Number(wasPrice.value ?? price.wasPrice ?? p.wasPrice ?? p.regularPrice ?? 0)
@@ -267,6 +267,11 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
       productUrl: p.url ? `https://www.canadiantire.ca${p.url}` : undefined,
       inStock: true, isPenny: curr <= 0.01, category: String(firstCat.name ?? p.category ?? '') }]
   })
+  if (!mapped.length) {
+    const s = products[0] ?? {}
+    throw new Error(`CT: ${products.length} products found but price=0 for all. First item keys: ${Object.keys(s).join(', ')} | price field: ${JSON.stringify(s.price)?.slice(0, 150)}`)
+  }
+  return mapped
 }
 
 // ─── BEST BUY ─────────────────────────────────────────────────────────────────
