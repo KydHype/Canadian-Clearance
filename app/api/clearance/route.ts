@@ -213,7 +213,6 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
     pagetype: 'promolisting',
     'browse-mode': 'OFF',
     devicetype: 'd',
-    light: 'true',
   })
   const ctTargetUrl = `https://www.canadiantire.ca/api/v1/search/v2/search?${ctParams}`
   const saKey = process.env.SCRAPER_API_KEY
