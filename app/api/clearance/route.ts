@@ -19,7 +19,7 @@ const HEADERS = {
 function proxied(url: string) {
   const key = process.env.SCRAPER_API_KEY
   if (!key) return url
-  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&country_code=ca&device_type=desktop`
+  return `https://api.scraperapi.com?api_key=${key}&url=${encodeURIComponent(url)}&country_code=ca`
 }
 
 async function get(url: string, asJson = false): Promise<{ ok: boolean; status: number; text: string }> {
@@ -145,11 +145,11 @@ async function hdClearance(province: string): Promise<ClearanceItem[]> {
 // __NEXT_DATA__.props.pageProps.initialData.searchResult.itemStacks[n].items
 async function wmClearance(province: string): Promise<ClearanceItem[]> {
   const store = fakeStore('walmart', 'Walmart', province)
-  // search?q=clearance redirects to the clearance category page and that final URL has __NEXT_DATA__
-  // Using the canonical URL directly skips that redirect and returns a static page without SSR data
-  const html = await getHtml('https://www.walmart.ca/search?q=clearance')
+  // Use the canonical clearance URL with ?q=clearance directly — this is what the search redirect
+  // lands on, and the ?q=clearance param triggers SSR with __NEXT_DATA__ product listings
+  const html = await getHtml('https://www.walmart.ca/en/shop/clearance/6000204800999?q=clearance')
   const nd = extractNextData(html)
-  if (!nd) throw new Error('No __NEXT_DATA__ found — Walmart page structure may have changed')
+  if (!nd) throw new Error(`No __NEXT_DATA__ — got ${html.length}b, starts: ${html.slice(0, 120).replace(/\s+/g, ' ')}`)
 
   // Walmart nests products inside itemStacks[n].items — handle that specifically
   let products: Record<string, unknown>[] = []
