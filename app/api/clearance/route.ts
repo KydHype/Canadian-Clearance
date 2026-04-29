@@ -246,6 +246,12 @@ async function ctClearance(province: string): Promise<ClearanceItem[]> {
     const keys = json && typeof json === 'object' ? Object.keys(json as object).join(', ') : String(json).slice(0, 100)
     throw new Error(`CT: no products in response. Top-level keys: ${keys}`)
   }
+  // Diagnostic: expose currentPrice value from first product
+  if (products.length > 0) {
+    const s = products[0]
+    const skuSample = Array.isArray(s.skus) ? (s.skus as unknown[])[0] : undefined
+    throw new Error(`CT debug — currentPrice: ${JSON.stringify(s.currentPrice)} | skus[0]: ${JSON.stringify(skuSample)?.slice(0, 200)}`)
+  }
   return products.flatMap(p => {
     // CT puts currentPrice directly on the product; wasPrice is in skus[0]
     const curr = Number(p.currentPrice ?? 0)
